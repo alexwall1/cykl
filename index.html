@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Cykelkartan</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+    }
+
+    #map {
+      width: 100%;
+      height: 100%;
+    }
+
+    #controls {
+      position: absolute;
+      top: 50%;
+      right: 16px;
+      transform: translateY(-50%);
+      z-index: 1000;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .ctrl-btn {
+      width: 44px;
+      height: 44px;
+      background: #1e1e1e;
+      border: none;
+      border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.6);
+      font-size: 22px;
+      font-weight: 600;
+      color: #e0e0e0;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s, box-shadow 0.15s;
+      line-height: 1;
+    }
+
+    .ctrl-btn:hover {
+      background: #2e2e2e;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.7);
+    }
+
+    .ctrl-btn:active {
+      background: #3a3a3a;
+    }
+
+    .ctrl-btn svg {
+      width: 22px;
+      height: 22px;
+      fill: none;
+      stroke: #e0e0e0;
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    #locate-btn {
+      margin-top: 8px;
+    }
+
+    .bar-icon {
+      font-size: 20px;
+      line-height: 1;
+      cursor: pointer;
+      filter: drop-shadow(0 1px 3px rgba(0,0,0,0.8));
+    }
+
+    .leaflet-popup-content-wrapper {
+      background: #1e1e1e;
+      color: #e0e0e0;
+      border-radius: 10px;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.7);
+      border: 1px solid #333;
+    }
+
+    .leaflet-popup-tip {
+      background: #1e1e1e;
+    }
+
+    .leaflet-popup-close-button {
+      color: #999 !important;
+    }
+
+    .bar-popup h3 {
+      font-size: 15px;
+      font-weight: 600;
+      margin-bottom: 8px;
+      color: #fff;
+    }
+
+    .bar-popup table {
+      border-collapse: collapse;
+      width: 100%;
+      font-size: 13px;
+    }
+
+    .bar-popup td {
+      padding: 3px 0;
+      vertical-align: top;
+    }
+
+    .bar-popup td:first-child {
+      color: #888;
+      padding-right: 10px;
+      white-space: nowrap;
+    }
+
+    .bar-popup td:last-child {
+      color: #ccc;
+    }
+
+    .bar-popup a {
+      color: #7ab8f5;
+      text-decoration: none;
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+
+  <div id="controls">
+    <button class="ctrl-btn" id="zoom-in" title="Zooma in">+</button>
+    <button class="ctrl-btn" id="zoom-out" title="Zooma ut">−</button>
+    <button class="ctrl-btn" id="locate-btn" title="Centrera på min position">
+      <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+        <circle cx="12" cy="12" r="3"/>
+        <line x1="12" y1="2" x2="12" y2="6"/>
+        <line x1="12" y1="18" x2="12" y2="22"/>
+        <line x1="2" y1="12" x2="6" y2="12"/>
+        <line x1="18" y1="12" x2="22" y2="12"/>
+      </svg>
+    </button>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    const map = L.map('map', {
+      center: [59.3293, 18.0686],
+      zoom: 13,
+      zoomControl: false,
+      attributionControl: true
+    });
+
+    // Baslager: CartoDB Dark Matter – mörk karta utan POI-ikoner
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+      maxZoom: 20,
+      attribution:
+        '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors ' +
+        '&copy; <a href="https://carto.com/">CARTO</a>'
+    }).addTo(map);
+
+    // Overlay: CyclOSM Lite – visar enbart cykelinfrastruktur
+    L.tileLayer('https://{s}.tile-cyclosm.openstreetmap.fr/cyclosm-lite/{z}/{x}/{y}.png', {
+      maxZoom: 20,
+      opacity: 1,
+      attribution:
+        '<a href="https://github.com/cyclosm/cyclosm-cartocss-style/releases" title="CyclOSM">CyclOSM</a>'
+    }).addTo(map);
+
+    // --- Barer från Overpass API ---
+    const beerIcon = L.divIcon({
+      html: '<span class="bar-icon">🍺</span>',
+      className: '',
+      iconSize: [24, 24],
+      iconAnchor: [12, 12],
+      popupAnchor: [0, -14]
+    });
+
+    function formatOpeningHours(raw) {
+      if (!raw) return null;
+      // Bryt upp på semikolon för lättläslighet
+      return raw.split(';').map(s => s.trim()).join('<br>');
+    }
+
+    function buildPopup(tags) {
+      const name    = tags.name || 'Okänt namn';
+      const hours   = formatOpeningHours(tags.opening_hours);
+      const street  = [tags['addr:street'], tags['addr:housenumber']].filter(Boolean).join(' ');
+      const phone   = tags.phone || tags['contact:phone'];
+      const website = tags.website || tags['contact:website'];
+
+      const rows = [];
+      if (hours)   rows.push(`<tr><td>Öppettider</td><td>${hours}</td></tr>`);
+      if (street)  rows.push(`<tr><td>Adress</td><td>${street}</td></tr>`);
+      if (phone)   rows.push(`<tr><td>Telefon</td><td>${phone}</td></tr>`);
+      if (website) rows.push(`<tr><td>Webb</td><td><a href="${website}" target="_blank" rel="noopener">${website.replace(/^https?:\/\//, '')}</a></td></tr>`);
+
+      return `<div class="bar-popup">
+        <h3>🍺 ${name}</h3>
+        ${rows.length ? `<table>${rows.join('')}</table>` : '<p style="color:#888;font-size:13px">Ingen ytterligare info</p>'}
+      </div>`;
+    }
+
+    async function loadBars() {
+      const query = `[out:json][timeout:25];
+node["amenity"="bar"](59.22,17.75,59.45,18.40);
+out body;`;
+
+      const endpoints = [
+        'https://overpass-api.de/api/interpreter',
+        'https://overpass.kumi.systems/api/interpreter',
+        'https://maps.mail.ru/osm/tools/overpass/api/interpreter'
+      ];
+
+      for (const url of endpoints) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 8000);
+        try {
+          const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: 'data=' + encodeURIComponent(query),
+            signal: controller.signal
+          });
+          clearTimeout(timer);
+          if (!res.ok) { console.warn(`${url} svarade ${res.status}, provar nästa…`); continue; }
+          const data = await res.json();
+          for (const el of data.elements) {
+            L.marker([el.lat, el.lon], { icon: beerIcon })
+              .bindPopup(buildPopup(el.tags || {}), { maxWidth: 280 })
+              .addTo(map);
+          }
+          return;
+        } catch (e) {
+          clearTimeout(timer);
+          console.warn(`${url} misslyckades (${e.message}), provar nästa…`);
+        }
+      }
+      console.error('Alla Overpass-endpoints misslyckades.');
+    }
+
+    loadBars();
+
+    // --- Offentliga toaletter från Overpass API ---
+    async function loadToilets() {
+      const query = `[out:json][timeout:25];
+node["amenity"="toilets"]["access"!="private"](59.22,17.75,59.45,18.40);
+out body;`;
+
+      const toiletIcon = L.divIcon({
+        html: '<span style="font-size:18px;line-height:1;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.8))">🚽</span>',
+        className: '',
+        iconSize: [24, 24],
+        iconAnchor: [12, 12]
+      });
+
+      const endpoints = [
+        'https://overpass-api.de/api/interpreter',
+        'https://overpass.kumi.systems/api/interpreter',
+        'https://maps.mail.ru/osm/tools/overpass/api/interpreter'
+      ];
+
+      for (const url of endpoints) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 8000);
+        try {
+          const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: 'data=' + encodeURIComponent(query),
+            signal: controller.signal
+          });
+          clearTimeout(timer);
+          if (!res.ok) { console.warn(`${url} svarade ${res.status}, provar nästa…`); continue; }
+          const data = await res.json();
+          for (const el of data.elements) {
+            L.marker([el.lat, el.lon], { icon: toiletIcon, interactive: false }).addTo(map);
+          }
+          return;
+        } catch (e) {
+          clearTimeout(timer);
+          console.warn(`${url} misslyckades (${e.message}), provar nästa…`);
+        }
+      }
+      console.error('Alla Overpass-endpoints misslyckades för toaletter.');
+    }
+
+    loadToilets();
+
+    // --- Cykelpumpar från Stockholms stad ---
+    async function loadPumps() {
+      const apiKey = '${STOCKHOLM_API_KEY}';
+      const base = 'https://openstreetws.stockholm.se/LvWS-4.0/Lv.svc/json';
+
+      const pumpIcon = L.divIcon({
+        html: '<span style="font-size:18px;line-height:1;cursor:pointer;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.8))">🚲</span>',
+        className: '',
+        iconSize: [24, 24],
+        iconAnchor: [12, 12],
+        popupAnchor: [0, -14]
+      });
+
+      // Parsar "POINT Z (lon lat z)" eller "POINT (lon lat)" → [lat, lon]
+      function parseWkt(wkt) {
+        const m = wkt && wkt.match(/POINT(?:\s+Z)?\s*\(\s*([\d.]+)\s+([\d.]+)/i);
+        if (!m) return null;
+        return [parseFloat(m[2]), parseFloat(m[1])];
+      }
+
+      try {
+        // Steg 1: hämta alla ObjectIds för Cykelpump
+        const listRes = await fetch(
+          `${base}/GetFeatureListForSearchParameters?apiKey=${encodeURIComponent(apiKey)}&featureTypeName=Cykelpump`
+        );
+        if (!listRes.ok) { console.error('Cykelpumpar lista: HTTP', listRes.status); return; }
+        const list = await listRes.json();
+        const ids = list.map(f => f.ObjectId);
+        if (!ids.length) { console.warn('Inga cykelpumpar hittades.'); return; }
+
+        // Steg 2: hämta geometri för alla pumpar i ett anrop
+        const featRes = await fetch(
+          `${base}/GetFeatures?apiKey=${encodeURIComponent(apiKey)}&objectIds=${JSON.stringify(ids)}&includeWktForExtents=false`
+        );
+        if (!featRes.ok) { console.error('Cykelpumpar geometri: HTTP', featRes.status); return; }
+        const features = await featRes.json();
+
+        function attr(f, name) {
+          const a = f.AttributeValues?.find(a => a.AttributeName === name);
+          return a?.Value ?? null;
+        }
+
+        function buildPumpPopup(f) {
+          const namn     = attr(f, 'Namn') || attr(f, 'Adress') || 'Okänd plats';
+          const status   = attr(f, 'Status');
+          const modell   = attr(f, 'Modell');
+          const ventiler = attr(f, 'Ventiler');
+          const ansvar   = attr(f, 'Driftansvar');
+
+          const rows = [];
+          if (status)   rows.push(`<tr><td>Status</td><td>${status}</td></tr>`);
+          if (modell)   rows.push(`<tr><td>Modell</td><td>${modell}</td></tr>`);
+          if (ventiler) rows.push(`<tr><td>Ventiler</td><td>${ventiler}</td></tr>`);
+          if (ansvar)   rows.push(`<tr><td>Driftansvar</td><td>${ansvar}</td></tr>`);
+
+          return `<div class="bar-popup">
+            <h3>🚲 ${namn}</h3>
+            ${rows.length ? `<table>${rows.join('')}</table>` : '<p style="color:#888;font-size:13px">Ingen ytterligare info</p>'}
+          </div>`;
+        }
+
+        let count = 0;
+        for (const f of features) {
+          const wkt = f.Geometries?.[0]?.WKT;
+          const coords = parseWkt(wkt);
+          if (!coords) continue;
+          L.marker(coords, { icon: pumpIcon })
+            .bindPopup(buildPumpPopup(f), { maxWidth: 280 })
+            .addTo(map);
+          count++;
+        }
+        console.log(`Laddade ${count} cykelpumpar.`);
+      } catch (e) {
+        console.error('Kunde inte hämta cykelpumpar:', e);
+      }
+    }
+
+    loadPumps();
+
+    document.getElementById('zoom-in').addEventListener('click', () => map.zoomIn());
+    document.getElementById('zoom-out').addEventListener('click', () => map.zoomOut());
+
+    document.getElementById('locate-btn').addEventListener('click', () => {
+      if (!navigator.geolocation) {
+        alert('Geolokalisering stöds inte av din webbläsare.');
+        return;
+      }
+      navigator.geolocation.getCurrentPosition(
+        pos => {
+          map.setView([pos.coords.latitude, pos.coords.longitude], 15);
+        },
+        err => {
+          alert('Kunde inte hämta din position: ' + err.message);
+        },
+        { enableHighAccuracy: true, timeout: 10000 }
+      );
+    });
+  </script>
+</body>
+</html>
