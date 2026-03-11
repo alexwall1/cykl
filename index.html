@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Cykelkartan</title>
+  <title>Cykl 1.0</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <style>
     * {
@@ -130,6 +130,14 @@
       color: #7ab8f5;
       text-decoration: none;
     }
+
+    .toilet-icon {
+      font-size: 18px;
+      line-height: 1;
+      cursor: pointer;
+      pointer-events: auto;
+      filter: drop-shadow(0 1px 3px rgba(0,0,0,0.8));
+    }
   </style>
 </head>
 <body>
@@ -248,48 +256,83 @@ out body;`;
 
     loadBars();
 
-    // --- Offentliga toaletter från Overpass API ---
+    // Parsar "POINT Z (lon lat z)" eller "POINT (lon lat)" → [lat, lon]
+    function parseWkt(wkt) {
+      const m = wkt && wkt.match(/POINT(?:\s+Z)?\s*\(\s*([\d.]+)\s+([\d.]+)/i);
+      if (!m) return null;
+      return [parseFloat(m[2]), parseFloat(m[1])];
+    }
+
+    // --- Offentliga toaletter från Trafikkontorets API ---
     async function loadToilets() {
-      const query = `[out:json][timeout:25];
-node["amenity"="toilets"]["access"!="private"](59.22,17.75,59.45,18.40);
-out body;`;
+      const apiKey = '${STOCKHOLM_API_KEY}';
+      const base = 'https://openstreetws.stockholm.se/LvWS-4.0/Lv.svc/json';
 
       const toiletIcon = L.divIcon({
-        html: '<span style="font-size:18px;line-height:1;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.8))">🚽</span>',
+        html: '<span class="toilet-icon">🚽</span>',
         className: '',
         iconSize: [24, 24],
-        iconAnchor: [12, 12]
+        iconAnchor: [12, 12],
+        popupAnchor: [0, -14]
       });
 
-      const endpoints = [
-        'https://overpass-api.de/api/interpreter',
-        'https://overpass.kumi.systems/api/interpreter',
-        'https://maps.mail.ru/osm/tools/overpass/api/interpreter'
-      ];
-
-      for (const url of endpoints) {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 8000);
-        try {
-          const res = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: 'data=' + encodeURIComponent(query),
-            signal: controller.signal
-          });
-          clearTimeout(timer);
-          if (!res.ok) { console.warn(`${url} svarade ${res.status}, provar nästa…`); continue; }
-          const data = await res.json();
-          for (const el of data.elements) {
-            L.marker([el.lat, el.lon], { icon: toiletIcon, interactive: false }).addTo(map);
-          }
-          return;
-        } catch (e) {
-          clearTimeout(timer);
-          console.warn(`${url} misslyckades (${e.message}), provar nästa…`);
-        }
+      function attr(f, name) {
+        const a = f.AttributeValues?.find(a => a.AttributeName === name);
+        return a?.Value ?? null;
       }
-      console.error('Alla Overpass-endpoints misslyckades för toaletter.');
+
+      function buildToiletPopup(f) {
+        const namn        = attr(f, 'Namn') || attr(f, 'Adress') || 'Okänd plats';
+        const beskrivning = attr(f, 'Beskrivning');
+        const status      = attr(f, 'Status');
+
+        const rows = [];
+        if (beskrivning) rows.push(`<tr><td>Beskrivning</td><td>${beskrivning}</td></tr>`);
+        if (status)      rows.push(`<tr><td>Status</td><td>${status}</td></tr>`);
+
+        return `<div class="bar-popup">
+          <h3>🚽 ${namn}</h3>
+          ${rows.length ? `<table>${rows.join('')}</table>` : '<p style="color:#888;font-size:13px">Ingen ytterligare info</p>'}
+        </div>`;
+      }
+
+      try {
+        // Steg 1: hämta alla ObjectIds för Toalett
+        const listRes = await fetch(
+          `${base}/GetFeatureListForSearchParameters?apiKey=${encodeURIComponent(apiKey)}&featureTypeName=Toalett`
+        );
+        if (!listRes.ok) { console.error('Toaletter lista: HTTP', listRes.status); return; }
+        const list = await listRes.json();
+        const ids = list.map(f => f.ObjectId);
+        if (!ids.length) { console.warn('Inga toaletter hittades.'); return; }
+
+        // Steg 2: hämta geometri och attribut för alla toaletter
+        const featRes = await fetch(
+          `${base}/GetFeatures?apiKey=${encodeURIComponent(apiKey)}&objectIds=${JSON.stringify(ids)}&includeWktForExtents=false`
+        );
+        if (!featRes.ok) { console.error('Toaletter geometri: HTTP', featRes.status); return; }
+        const features = await featRes.json();
+
+        let count = 0;
+        for (const f of features) {
+          const wkt = f.Geometries?.[0]?.WKT;
+          const coords = parseWkt(wkt);
+          if (!coords) continue;
+          const content = buildToiletPopup(f);
+          L.marker(coords, { icon: toiletIcon })
+            .addTo(map)
+            .on('click', function () {
+              L.popup({ maxWidth: 280 })
+                .setLatLng(this.getLatLng())
+                .setContent(content)
+                .openOn(map);
+            });
+          count++;
+        }
+        console.log(`Laddade ${count} toaletter.`);
+      } catch (e) {
+        console.error('Kunde inte hämta toaletter:', e);
+      }
     }
 
     loadToilets();
@@ -306,13 +349,6 @@ out body;`;
         iconAnchor: [12, 12],
         popupAnchor: [0, -14]
       });
-
-      // Parsar "POINT Z (lon lat z)" eller "POINT (lon lat)" → [lat, lon]
-      function parseWkt(wkt) {
-        const m = wkt && wkt.match(/POINT(?:\s+Z)?\s*\(\s*([\d.]+)\s+([\d.]+)/i);
-        if (!m) return null;
-        return [parseFloat(m[2]), parseFloat(m[1])];
-      }
 
       try {
         // Steg 1: hämta alla ObjectIds för Cykelpump
